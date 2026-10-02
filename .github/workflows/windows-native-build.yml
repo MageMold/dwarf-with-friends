@@ -38,6 +38,8 @@ jobs:
             os: windows-2022
             binary: dwf.plug.dll
             dfhack_ref: 53.16-r2rc2
+            # Not the DFHack pinned in host/download-manifest.json, so build_receipt.mjs rejects it.
+            unpinned: true
           - platform: linux
             os: ubuntu-22.04
             artifact: linux
@@ -127,6 +129,7 @@ jobs:
           true
 
       - name: Record artifact identity
+        if: ${{ !matrix.unpinned }}
         run: node plugins/external/multi-dwarf/tools/release/build_receipt.mjs --dfhack-build build --platform ${{ matrix.platform }} --out build-receipt.json
 
       - name: Inspect Linux shared-library requirements
@@ -141,5 +144,5 @@ jobs:
           name: dwf-${{ matrix.artifact }}-${{ github.sha }}
           path: |
             build/plugins/external/multi-dwarf/${{ matrix.binary }}
-            build-receipt.json
+            ${{ !matrix.unpinned && 'build-receipt.json' || '' }}
           if-no-files-found: error
