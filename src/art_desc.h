@@ -25,6 +25,10 @@
 
 #include "httplib.h"
 
+// df::coord is a struct in DFHack 53.16-r1 but an alias of DFHack::Coord3d<int16_t> from
+// 53.16-r2, so it cannot be forward-declared; include its header instead.
+#include "df/coord.h"
+
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -32,7 +36,6 @@
 namespace df {
 struct item;
 struct building;
-struct coord;
 struct art_image;   // find_art_image()'s return type
 }
 

@@ -21,6 +21,9 @@
 
 #pragma once
 
+// From DFHack 53.16-r2 DataDefs.h no longer pulls in df/coord.h, but Constructions.h
+// still names df::coord without including it.
+#include <df/coord.h>
 #include <modules/Constructions.h>
 #include <modules/MapCache.h>
 #include <df/construction.h>

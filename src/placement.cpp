@@ -35,6 +35,7 @@
 
 #include "Core.h"
 #include "TileTypes.h"
+#include "df/coord.h"   // Constructions.h needs df::coord; DFHack 53.16-r2 DataDefs.h no longer provides it
 #include "modules/Constructions.h"
 #include "modules/Designations.h"
 #include "modules/DFSDL.h"
