@@ -44,6 +44,7 @@
 #include "df/renderer.h"
 #include "df/viewscreen.h"
 #include "df/viewscreen_dwarfmodest.h"
+#include "df/viewport_spatter_flag.h"   // DFHack 53.16-r2 types screentexpos_spatter_flag with this union
 #include "df/world.h"
 
 #ifdef _WIN32
@@ -66,7 +67,13 @@
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#include <type_traits>
 #include <vector>
+
+// The tiledump wire format and the viewport pointer swap copy this layer as 4-byte elements;
+// it is uint32_t in DFHack 53.16-r1 and df::viewport_spatter_flag from 53.16-r2.
+static_assert(sizeof(std::remove_pointer_t<decltype(df::graphic_viewportst::screentexpos_spatter_flag)>) == 4,
+              "screentexpos_spatter_flag element size changed");
 
 namespace dwf {
 namespace {
