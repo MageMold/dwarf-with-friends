@@ -106,7 +106,25 @@ jobs:
             -DDFCAPTURE_BUILD_STAMP=${{ github.sha }}
 
       - name: Compile plugin
-        run: cmake --build build --config Release --target dfcapture_public --parallel 4
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --target dfcapture_public --parallel 4 2>&1 | tee build-output.log
+
+      # Surface the first compiler errors as annotations so they can be read without
+      # downloading the full job log.
+      - name: Annotate compile errors
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "(error C[0-9]+|error:|fatal error|error LNK)" build-output.log \
+            | sed -E 's#^.*plugins[/\\]external[/\\]multi-dwarf[/\\]##' \
+            | awk '!seen[$0]++' | head -n 40 > build-errors.txt || true
+          for i in 0 1 2 3; do
+            chunk=$(sed -n "$((i*10+1)),$((i*10+10))p" build-errors.txt | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g')
+            [ -n "$chunk" ] && echo "::error title=compile errors $((i+1))::${chunk}"
+          done
+          true
 
       - name: Record artifact identity
         run: node plugins/external/multi-dwarf/tools/release/build_receipt.mjs --dfhack-build build --platform ${{ matrix.platform }} --out build-receipt.json
