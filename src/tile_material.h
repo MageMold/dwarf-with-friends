@@ -22,7 +22,9 @@
 #pragma once
 
 // From DFHack 53.16-r2 DataDefs.h no longer pulls in df/coord.h, but Constructions.h
-// still names df::coord without including it.
+// still names df::coord without including it. DataDefs.h goes first because in 53.16-r1
+// it includes df/coord.h itself and then specializes std::hash on it.
+#include <DataDefs.h>
 #include <df/coord.h>
 #include <modules/Constructions.h>
 #include <modules/MapCache.h>

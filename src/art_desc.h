@@ -26,7 +26,9 @@
 #include "httplib.h"
 
 // df::coord is a struct in DFHack 53.16-r1 but an alias of DFHack::Coord3d<int16_t> from
-// 53.16-r2, so it cannot be forward-declared; include its header instead.
+// 53.16-r2, so it cannot be forward-declared; include its header instead. DataDefs.h must
+// come first: in 53.16-r1 it includes df/coord.h itself and then specializes std::hash on it.
+#include "DataDefs.h"
 #include "df/coord.h"
 
 #include <cstdint>

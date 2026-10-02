@@ -35,7 +35,10 @@
 
 #include "Core.h"
 #include "TileTypes.h"
-#include "df/coord.h"   // Constructions.h needs df::coord; DFHack 53.16-r2 DataDefs.h no longer provides it
+// Constructions.h needs df::coord, which DFHack 53.16-r2 DataDefs.h no longer provides.
+// DataDefs.h first: in 53.16-r1 it includes df/coord.h itself and specializes std::hash on it.
+#include "DataDefs.h"
+#include "df/coord.h"
 #include "modules/Constructions.h"
 #include "modules/Designations.h"
 #include "modules/DFSDL.h"
