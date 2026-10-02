@@ -25,6 +25,7 @@
 #include "client_state.h"   // note_host_camera (host-camera cache warmer)
 #include "diagnostics.h"
 #include "image_encoder.h"
+#include "overlay_control.h"
 #include "Core.h"
 #include "DataDefs.h"
 #include "PluginManager.h"
@@ -100,6 +101,10 @@ std::atomic<bool> g_warned_restore(false);
 std::atomic<bool> g_warned_capture_target_bind(false);
 std::atomic<bool> g_warned_host_buffer_restore(false);
 std::atomic<bool> g_warned_host_viewscreen_restore(false);
+// Keep-overlay mode: set when an auxiliary (see-down) capture had to write the host's own
+// viewport buffers, so restore_host_buffers_after_aux_capture() knows a restore is needed.
+std::atomic<bool> g_aux_capture_touched_host(false);
+std::atomic<bool> g_warned_private_capture_failed(false);
 std::atomic<bool> g_warned_host_interaction_skip(false);
 std::atomic<bool> g_warned_recovered_render_map(false);
 std::atomic<bool> g_warned_native_target_guard(false);
@@ -485,9 +490,12 @@ struct SavedViewportState {
 
 class ViewportZoomGuard {
 public:
-    bool activate(const Camera& camera, std::string* err) {
+    // force_private: even when the requested zoom equals the host's, point every viewport at
+    // dwf-owned buffers for the duration of the capture so the host's buffers are never written.
+    bool activate(const Camera& camera, std::string* err, bool force_private = false) {
         capture_zoom_reference_if_needed();
-        if (!per_player_zoom_active(camera))
+        bool zoom_active = per_player_zoom_active(camera);
+        if (!zoom_active && !force_private)
             return true;
 
         gps_ = df::global::gps;
@@ -500,13 +508,20 @@ public:
         }
 
         live_host_zoom_ = gps_->viewport_zoom_factor > 0 ? gps_->viewport_zoom_factor : 192;
-        int ref_zoom = g_ref_zoom_factor.load() > 0 ? g_ref_zoom_factor.load() : live_host_zoom_;
-        int percent = zoom_percent_for_camera(camera);
-        target_zoom_ = std::max(16, std::min(2048, (ref_zoom * 100 + percent / 2) / percent));
-        effective_zoom_dims(camera, main_vp->dim_x, main_vp->dim_y, target_dim_x_, target_dim_y_);
+        if (zoom_active) {
+            int ref_zoom = g_ref_zoom_factor.load() > 0 ? g_ref_zoom_factor.load() : live_host_zoom_;
+            int percent = zoom_percent_for_camera(camera);
+            target_zoom_ = std::max(16, std::min(2048, (ref_zoom * 100 + percent / 2) / percent));
+            effective_zoom_dims(camera, main_vp->dim_x, main_vp->dim_y, target_dim_x_, target_dim_y_);
+        } else {
+            target_zoom_ = live_host_zoom_;
+            target_dim_x_ = main_vp->dim_x;
+            target_dim_y_ = main_vp->dim_y;
+        }
 
-        if (target_dim_x_ == main_vp->dim_x && target_dim_y_ == main_vp->dim_y &&
-                target_zoom_ == live_host_zoom_)
+        resize_ = !(target_dim_x_ == main_vp->dim_x && target_dim_y_ == main_vp->dim_y &&
+                    target_zoom_ == live_host_zoom_);
+        if (!resize_ && !force_private)
             return true;
 
         viewports_ = collect_viewports(gps_);
@@ -533,30 +548,53 @@ public:
             for (auto& field : fields)
                 saved.pointers.push_back(*field.slot);
 
+            // Same-zoom private capture keeps each viewport's own geometry; only the buffer
+            // pointers move. A real zoom change resizes every viewport as before.
+            int dim_x = resize_ ? target_dim_x_ : vp->dim_x;
+            int dim_y = resize_ ? target_dim_y_ : vp->dim_y;
+            if (!resize_ && (dim_x <= 0 || dim_y <= 0))
+                continue; // unallocated viewport: nothing the capture could write into
+            if (dim_x <= 0 || dim_y <= 0 || dim_x > 4096 || dim_y > 4096) {
+                if (err) *err = "private viewport buffers unavailable: unexpected viewport size";
+                saved_.push_back(std::move(saved));
+                restore();
+                return false;
+            }
+
             auto& cache = cached_viewport_buffers(vp);
-            cache.prepare(target_dim_x_, target_dim_y_, fields);
+            cache.prepare(dim_x, dim_y, fields);
             for (size_t i = 0; i < fields.size(); ++i)
                 *fields[i].slot = cache.storage[i].empty() ? nullptr : cache.storage[i].data();
 
-            vp->dim_x = target_dim_x_;
-            vp->dim_y = target_dim_y_;
-            vp->clipx[0] = 0;
-            vp->clipx[1] = target_dim_x_ - 1;
-            vp->clipy[0] = 0;
-            vp->clipy[1] = target_dim_y_ - 1;
+            if (resize_) {
+                vp->dim_x = dim_x;
+                vp->dim_y = dim_y;
+                vp->clipx[0] = 0;
+                vp->clipx[1] = dim_x - 1;
+                vp->clipy[0] = 0;
+                vp->clipy[1] = dim_y - 1;
+            }
             saved_.push_back(std::move(saved));
         }
 
-        gps_->viewport_zoom_factor = target_zoom_;
-        if (!call_set_viewport_zoom_factor_seh(renderer_, target_zoom_)) {
-            g_zoom_unsafe.store(true);
-            if (err) *err = "zoom unsafe: set_viewport_zoom_factor faulted";
-            restore();
-            return false;
+        if (resize_) {
+            gps_->viewport_zoom_factor = target_zoom_;
+            zoom_applied_ = true;
+            if (!call_set_viewport_zoom_factor_seh(renderer_, target_zoom_)) {
+                g_zoom_unsafe.store(true);
+                if (err) *err = "zoom unsafe: set_viewport_zoom_factor faulted";
+                restore();
+                return false;
+            }
         }
         gps_->force_full_display_count = 1;
         active_ = true;
         return true;
+    }
+
+    // True when the host's own viewport buffers were swapped out for this capture.
+    bool private_buffers() const {
+        return active_;
     }
 
     bool active() const {
@@ -565,11 +603,13 @@ public:
 
     void restore() {
         if (gps_) {
-            gps_->viewport_zoom_factor = live_host_zoom_ > 0 ? live_host_zoom_ : 192;
+            if (zoom_applied_)
+                gps_->viewport_zoom_factor = live_host_zoom_ > 0 ? live_host_zoom_ : 192;
             gps_->force_full_display_count = 1;
         }
-        if (renderer_ && live_host_zoom_ > 0)
+        if (zoom_applied_ && renderer_ && live_host_zoom_ > 0)
             call_set_viewport_zoom_factor_seh(renderer_, live_host_zoom_);
+        zoom_applied_ = false;
 
         for (auto it = saved_.rbegin(); it != saved_.rend(); ++it) {
             auto vp = it->vp;
@@ -602,6 +642,8 @@ private:
     df::graphic* gps_ = nullptr;
     df::renderer* renderer_ = nullptr;
     bool active_ = false;
+    bool resize_ = false;
+    bool zoom_applied_ = false;
     int live_host_zoom_ = 0;
     int target_zoom_ = 0;
     int target_dim_x_ = 0;
@@ -1380,10 +1422,21 @@ bool capture_shifted(const Camera& camera, CapturedFrame& frame,
     capture_zoom_reference_if_needed();
     ViewportZoomGuard zoom_guard;
     std::string zoom_err;
-    if (!zoom_guard.activate(camera, &zoom_err)) {
+    // With the DFHack overlay enabled the host viewscreen must never be re-rendered from this
+    // thread (overlay Lua), so render the remote camera into private buffers instead and leave
+    // the host's buffers untouched.
+    const bool want_private = overlay_plugin_enabled();
+    if (!zoom_guard.activate(camera, &zoom_err, want_private)) {
         diagnostics_log("DIAG: " + zoom_err + "; per-player zoom disabled.");
         g_zoom_unsafe.store(true);
     }
+    const bool private_capture = zoom_guard.private_buffers();
+    if (want_private && !private_capture && !g_warned_private_capture_failed.exchange(true)) {
+        diagnostics_log("DIAG: keep-overlay private capture unavailable; host buffers are written "
+                        "and restored with a map-only render.");
+    }
+    if (!private_capture && !restore_host_buffers)
+        g_aux_capture_touched_host.store(true);
     {
         static std::atomic<int> s_last_zf{-999};
         int zf = camera.zoom_factor;
@@ -1414,6 +1467,8 @@ bool capture_shifted(const Camera& camera, CapturedFrame& frame,
         if (!g_warned_viewscreen_render_fallback.exchange(true)) {
             diagnostics_log("DIAG: " + map_err + "; rendering shifted view through viewscreen fallback.");
         }
+        if (overlay_plugin_enabled())
+            request_overlay_disable("direct map renderer unavailable: " + map_err);
         if (!render_viewscreen_without_overlay(err)) {
             *df::global::window_x = saved.x;
             *df::global::window_y = saved.y;
@@ -1490,8 +1545,10 @@ bool capture_shifted(const Camera& camera, CapturedFrame& frame,
 
     if (restore_host_buffers) {
 #ifdef _WIN32
-        bool full_restore_ok = false;
-        if (needs_full_host_restore) {
+        // A private capture never wrote the host's viewport buffers: nothing to restore, and no
+        // host viewscreen render (which would run DFHack overlay Lua on this thread).
+        bool full_restore_ok = private_capture;
+        if (!full_restore_ok && needs_full_host_restore) {
             std::string vs_restore_err;
             full_restore_ok = render_viewscreen_without_overlay(&vs_restore_err);
             if (!full_restore_ok && !g_warned_host_viewscreen_restore.exchange(true)) {
@@ -1577,7 +1634,7 @@ bool bake_sweep_render_step(const Camera& target, std::string* err) {
         capture_zoom_reference_if_needed();
         ViewportZoomGuard zoom_guard;
         std::string zoom_err;
-        if (!zoom_guard.activate(request->target, &zoom_err)) {
+        if (!zoom_guard.activate(request->target, &zoom_err, overlay_plugin_enabled())) {
             restore();
             request->err = zoom_err;
             request->done.set_value(false);
@@ -1638,6 +1695,24 @@ void restore_host_buffers_after_aux_capture(const char* reason) {
         gps->force_full_display_count = 1;
 
 #ifdef _WIN32
+    // Keep-overlay mode: auxiliary captures normally render into private buffers, so the host's
+    // buffers need no restore. Only re-render the host map if one of them wrote host buffers;
+    // never re-render the host viewscreen while the overlay plugin is enabled.
+    const bool touched_host = g_aux_capture_touched_host.exchange(false);
+    if (overlay_plugin_enabled()) {
+        if (touched_host) {
+            std::string map_err;
+            if (!render_map_for_current_window(&map_err) &&
+                    !g_warned_seedown_host_restore.exchange(true)) {
+                diagnostics_log(std::string("DIAG: host map-buffer restore failed after ") + reason +
+                                " auxiliary capture: " + map_err);
+            }
+        }
+        if (gps)
+            gps->force_full_display_count = 1;
+        return;
+    }
+
     std::string restore_err;
     if (!render_map_for_current_window(&restore_err) &&
             !g_warned_seedown_host_restore.exchange(true)) {

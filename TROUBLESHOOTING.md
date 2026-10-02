@@ -136,6 +136,21 @@ If you are driving DFHack by hand, note that `dfhack-run` on Linux needs a real 
 crashes when its output is piped. The host panel already runs it under a pseudo-terminal, so this
 only matters for commands you type yourself.
 
+## DFHack overlay tools while streaming (Windows)
+
+DFHack's on-screen tools (workshop toggles, stockpile import/export buttons, the mod manager
+button, info panels) come from DFHack's `overlay` plugin. On Windows this build keeps that plugin
+enabled while the stream is running: remote cameras are drawn into dwf's own private viewport
+buffers, so the host's screen is never re-rendered from the capture thread and DFHack overlay Lua
+never runs there.
+
+- To go back to the old behaviour (overlay disabled for the whole stream), create an empty file
+  named `dfcapture_disable_overlay.txt` in the Dwarf Fortress folder and restart the stream.
+- If the direct map renderer is unavailable on your DF build, dwf disables the overlay by itself
+  for that stream and says so in the DFHack console; it is restored when the stream stops.
+- While the overlay is enabled, art and engraving descriptions that are not already cached are
+  not generated for browser players (that path needs a host viewscreen render).
+
 ## Diagnostic log retention
 
 The plugin writes `dwf.log` in the Dwarf Fortress folder. The active log is capped at 4 MiB. When

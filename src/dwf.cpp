@@ -69,7 +69,8 @@ bool parse_port(const std::string& text, int& port) {
 }
 
 void print_line(color_ostream& out, const std::string& text) {
-    out.print("%s", text.c_str());
+    // color_ostream::print takes an fmt format string ("{}"), not printf ("%s").
+    out.print("{}", text);
 }
 
 const char* kJoinPasswordFile = dwf::auth::kPasswordFile;   // single source of truth (auth.h)
@@ -256,7 +257,14 @@ command_result cmd_start(color_ostream& out, std::vector<std::string>& args) {
     }
 
     std::string overlay_note;
-    if (!dwf::disable_overlay_for_stream(out, &overlay_note)) {
+    if (dwf::overlay_keep_mode_requested()) {
+        // Remote cameras render into private viewport buffers, so the host viewscreen is never
+        // re-rendered off its own frame and DFHack overlay Lua never runs on the render thread.
+        dwf::diagnostics_log("DIAG: keep-overlay mode: DFHack overlay stays enabled while streaming.");
+        if (dwf::overlay_plugin_enabled())
+            overlay_note = "DFHack overlay stays enabled while streaming (create "
+                           "dfcapture_disable_overlay.txt to restore the old behaviour).";
+    } else if (!dwf::disable_overlay_for_stream(out, &overlay_note)) {
         out.printerr("dwf: cannot stream -- %s\n", overlay_note.c_str());
         dwf::diagnostics_log("stream start failed: overlay could not be disabled: " +
                                           overlay_note);
@@ -606,7 +614,9 @@ DFhackCExport command_result plugin_save_site_data(color_ostream&) {
     return CR_OK;
 }
 
-DFhackCExport command_result plugin_onupdate(color_ostream&) {
+DFhackCExport command_result plugin_onupdate(color_ostream& out) {
+    if (dwf::server_running())
+        dwf::service_overlay_requests(out);
     dwf::save_barrier_update();
     dwf::portrait_sweep_tick();
     return CR_OK;

@@ -26,6 +26,8 @@
 #include "Core.h"
 #include "PluginManager.h"
 
+#include <atomic>
+#include <fstream>
 #include <mutex>
 
 namespace dwf {
@@ -33,6 +35,11 @@ namespace {
 
 std::mutex g_overlay_mutex;
 bool g_overlay_disabled_by_dwf = false;
+
+constexpr const char* kDisableOverlayFlagFile = "dfcapture_disable_overlay.txt";
+std::atomic<bool> g_overlay_disable_requested(false);
+std::mutex g_overlay_request_mutex;
+std::string g_overlay_disable_reason;
 
 } // namespace
 
@@ -87,6 +94,50 @@ void restore_overlay_after_stream(DFHack::color_ostream* out) {
 
     g_overlay_disabled_by_dwf = false;
     diagnostics_log("DIAG: restored DFHack overlay after dwf stream stop.");
+}
+
+bool overlay_keep_mode_requested() {
+#ifdef _WIN32
+    std::ifstream flag(kDisableOverlayFlagFile);
+    return !flag.good();
+#else
+    // The Linux capture path renders the host viewscreen directly and still needs the
+    // overlay plugin disabled.
+    return false;
+#endif
+}
+
+bool overlay_plugin_enabled() {
+    auto* plugins = DFHack::Core::getInstance().getPluginManager();
+    DFHack::Plugin* overlay = plugins ? plugins->getPluginByName("overlay") : nullptr;
+    return overlay && overlay->is_enabled();
+}
+
+void request_overlay_disable(const std::string& reason) {
+    {
+        std::lock_guard<std::mutex> lock(g_overlay_request_mutex);
+        if (g_overlay_disable_reason.empty())
+            g_overlay_disable_reason = reason;
+    }
+    g_overlay_disable_requested.store(true);
+}
+
+void service_overlay_requests(DFHack::color_ostream& out) {
+    if (!g_overlay_disable_requested.exchange(false))
+        return;
+    std::string reason;
+    {
+        std::lock_guard<std::mutex> lock(g_overlay_request_mutex);
+        reason.swap(g_overlay_disable_reason);
+    }
+    std::string note;
+    if (disable_overlay_for_stream(out, &note)) {
+        diagnostics_log("DIAG: keep-overlay mode fell back to disabling DFHack overlay: " + reason);
+        // color_ostream::print is fmt-style; stream the text so the reason is never parsed.
+        out << "dwf: DFHack overlay disabled for this stream (" << reason << ")." << std::endl;
+    } else {
+        diagnostics_log("WARN: keep-overlay fallback could not disable DFHack overlay: " + note);
+    }
 }
 
 } // namespace dwf

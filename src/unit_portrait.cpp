@@ -20,6 +20,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 #include "unit_portrait.h"
+#include "overlay_control.h"
 #include "render_thread_wait.h"
 
 #include "capture_guard.h"
@@ -599,6 +600,11 @@ bool copy_unit_portrait_candidate(df::unit* unit, df::enabler* enabler,
 
 bool render_viewscreen_isolated(std::string* err = nullptr, int target_w = 0, int target_h = 0) {
 #ifdef _WIN32
+    // The overlay plugin hooks viewscreen render and runs Lua; never trigger that from here.
+    if (overlay_plugin_enabled()) {
+        if (err) *err = "DFHack overlay is enabled (keep-overlay mode)";
+        return false;
+    }
     auto viewscreen = DFHack::Gui::getCurViewscreen(true);
     if (!viewscreen) {
         if (err) *err = "no current viewscreen";
@@ -800,6 +806,11 @@ NativePortraitOutcome unit_portrait_generate_native_on_render(df::unit* unit, st
 
 bool native_viewscreen_logic_render_isolated(std::string* err) {
 #ifdef _WIN32
+    // Viewscreen logic/render are both hooked by the DFHack overlay plugin (Lua).
+    if (overlay_plugin_enabled()) {
+        if (err) *err = "DFHack overlay is enabled (keep-overlay mode)";
+        return false;
+    }
     auto viewscreen = DFHack::Gui::getCurViewscreen(true);
     if (!viewscreen) {
         if (err) *err = "no current viewscreen";
